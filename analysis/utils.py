@@ -2,11 +2,12 @@ import os
 import json
 import re
 import math
+import time
 import numpy as np
 from numpy import mean
 import copy
 import torch
-
+from collections import defaultdict
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import meteor_score
 from nltk.stem import WordNetLemmatizer
@@ -15,6 +16,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from generation.utils import extract_all_comments, extract_before_fences
 
 from scipy.sparse import csr_matrix
+from scipy.stats import kurtosis
+from scipy.stats import skew
+
+from scipy.stats import gaussian_kde
+from scipy.signal import find_peaks
+
 from scipy.sparse.csgraph import minimum_spanning_tree
 from collections import defaultdict, deque
 def add_prefix_suffix(row, l_base, prefix, l_suffix):
@@ -412,3 +419,487 @@ def extract_requirement(data, task, dataset):
             elif dataset == 'codeguard_python.jsonl':
                 requirement = ''
             return requirement
+        
+def majority_true(flags):
+    """
+    Returns True if strictly more than half of the values are True.
+    """
+    if not flags:
+        return False  # or raise ValueError("Empty list")
+
+    return sum(flags) > len(flags) / 2
+
+class UnionFind:
+    def __init__(self, n):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+
+    def find(self, x):
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def union(self, x, y):
+        rx, ry = self.find(x), self.find(y)
+        if rx == ry:
+            return False
+        if self.rank[rx] < self.rank[ry]:
+            self.parent[rx] = ry
+        elif self.rank[rx] > self.rank[ry]:
+            self.parent[ry] = rx
+        else:
+            self.parent[ry] = rx
+            self.rank[rx] += 1
+        return True
+
+def distance_matrix_to_mst(distance_matrix):
+    """
+    Convert a distance matrix to a Minimum Spanning Tree (MST).
+
+    Parameters
+    ----------
+    distance_matrix : (n, n) array-like
+
+    Returns
+    -------
+    mst_edges : list of tuples (u, v, weight)
+    mst_matrix : (n, n) numpy array (adjacency matrix of MST)
+    """
+
+    D = np.asarray(distance_matrix)
+    n = D.shape[0]
+
+    # Step 1: Build edge list (upper triangle only)
+    edges = []
+    for u in range(n):
+        for v in range(u + 1, n):
+            edges.append((D[u, v], u, v))
+
+    # Step 2: Sort edges by weight
+    edges.sort(key=lambda x: x[0])
+
+    # Step 3: Kruskal's algorithm
+    uf = UnionFind(n)
+    mst_edges = []
+
+    for w, u, v in edges:
+        if uf.union(u, v):
+            mst_edges.append((u, v, w))
+        if len(mst_edges) == n - 1:
+            break
+
+    # Step 4: Build MST adjacency matrix
+    mst_matrix = np.zeros((n, n))
+    for u, v, w in mst_edges:
+        mst_matrix[u, v] = w
+        mst_matrix[v, u] = w
+
+    return mst_edges, mst_matrix
+
+def mst_to_qunatiles(mst_edges):
+    if not mst_edges:
+        return np.nan
+
+    weights = np.array([w for _, _, w in mst_edges])
+
+    if len(weights) < 2:
+        return 0.0
+    
+    q10 = np.percentile(weights, 10)
+    q90 = np.percentile(weights, 90)
+    q90_q10 = q90 - q10
+
+    return q90_q10
+
+def mst_to_kurtosis(mst_edges):
+    if not mst_edges:
+        return np.nan
+
+    weights = np.array([w for _, _, w in mst_edges])
+
+    if len(weights) < 2:
+        return np.nan
+    
+    mean = weights.mean()
+    std = weights.std()
+
+    if std == 0:
+        return 0.0
+    return kurtosis(weights, fisher=True, bias=False)
+    
+
+def mst_to_max_min(mst_edges):
+    if not mst_edges:
+        return np.nan, np.nan
+
+    weights = np.array([w for _, _, w in mst_edges])
+
+    return max(weights), min(weights)
+
+def mst_pruning_to_stable_weight(mst_edges, criteria, threshold):
+    if not mst_edges:
+        return np.nan
+
+    if not (0 < threshold < 1):
+        raise ValueError("threshold must be between 0 and 1")
+
+    if criteria not in ("mean", "std", "both"):
+        raise ValueError("flag must be 'mean' or 'std' or both")
+
+    # Extract weights sorted descending
+    weights = np.array(sorted([w for _, _, w in mst_edges], reverse=True))
+
+    # Original statistic (fixed reference)
+
+    # Current state
+    current_weights = weights.copy()
+    current_mean = weights.mean()
+    current_std = weights.std()
+
+    # Iterative pruning
+    for i in range(len(weights)):
+        if len(current_weights) <= 1:
+            break
+
+        # Remove current largest
+        new_weights = current_weights[1:]  # since sorted descending
+
+        new_mean = new_weights.mean()
+        new_std = new_weights.std()
+
+        # Check condition
+
+        if criteria=='mean' and new_mean < threshold * current_mean:
+            current_weights = new_weights
+            current_mean = current_weights.mean()
+            current_std = current_weights.std()
+
+        elif criteria=='std' and new_std < threshold * current_std:
+            current_weights = new_weights
+            current_mean = current_weights.mean()
+            current_std = current_weights.std()
+
+        elif criteria=='both' and ((new_std < threshold * current_std) or (new_mean < threshold * current_mean)):
+            current_weights = new_weights
+            current_mean = current_weights.mean()
+            current_std = current_weights.std()
+        else:
+            break
+
+    # Return largest remaining edge
+    #print('mst to stable', criteria, threshold, current_weights[0])
+    return current_weights
+
+def edge_type_stats(distance_matrix, labels):
+    """
+    Parameters
+    ----------
+    distance_matrix : (n, n) array-like
+        Symmetric pairwise distance matrix
+    labels : list or array-like of length n
+        Node labels: either 'white'/'black' OR boolean (True=white, False=black)
+
+    Returns
+    -------
+    dict with keys:
+        'white-white', 'black-black', 'white-black'
+        each containing {'mean': float, 'std': float, 'count': int}
+    """
+
+    D = np.asarray(distance_matrix)
+    n = D.shape[0]
+
+    # Normalize labels to boolean: True = white, False = black
+    labels = np.asarray(labels)
+    if labels.dtype != bool:
+        labels = (labels == "white")
+
+    # Upper triangle indices (exclude diagonal, avoid duplicates)
+    i, j = np.triu_indices(n, k=1)
+
+    dists = D[i, j]
+    li = labels[i]
+    lj = labels[j]
+
+    # Masks for edge types
+    ww_mask = (li & lj)
+    bb_mask = (~li & ~lj)
+    wb_mask = (li ^ lj)
+    
+    def stats(arr):
+        if arr.size == 0:
+            return {"mean": np.nan, "median":np.nan, "std": np.nan, "count": 0, "quantile":np.nan, "kurtosis":np.nan, "skew": np.nan, "peak_count": 0, "max_mode": 0, "min_mode":0}
+        if np.var(arr)==0:
+            return {"mean": float(arr.mean()), "median": float(np.median(arr)),"std": float(arr.std()), "count": int(arr.size), "quantile": 0, "kurtosis":-2, "skew": 0, "peak_count": 1, "max_mode": float(arr.mean()), "min_mode": float(arr.mean())}
+        kde = gaussian_kde(arr)
+        xs = np.linspace(min(arr), max(arr), 1000)
+        density = kde(xs)
+        peaks, _ = find_peaks(density)
+        if len(peaks)>1:
+            peak_count = len(peaks)
+            max_mode = max(xs[peaks])
+            min_mode = min(xs[peaks])
+
+        else:
+            peak_count = 1
+            max_mode = xs[np.argmax(density)]
+            min_mode = max_mode
+            
+        return {
+            "mean": float(arr.mean()),
+            "median": float(np.median(arr)),
+            "std": float(arr.std()),
+            "count": int(arr.size),
+            "quantile": float(np.percentile(arr, 90)-np.percentile(arr, 10)), 
+            "kurtosis": kurtosis(arr, fisher=True, bias=False),
+            "skew": skew(arr),
+            "peak_count": peak_count,
+            "max_mode": max_mode,
+            "min_mode": min_mode
+        }
+
+    global_stats = {
+        #"pass_pass": stats(dists[ww_mask]),
+        #"fail_fail": stats(dists[bb_mask]),
+        #"pass_fail": stats(dists[wb_mask]),
+        "all": stats(dists)
+    }
+
+ # ---------- PART 2: MST (Kruskal) ----------
+
+    start = time.perf_counter() 
+    edges = []
+    for u in range(n):
+        for v in range(u + 1, n):
+            edges.append((D[u, v], u, v))
+
+    edges.sort(key=lambda x: x[0])
+
+    uf = UnionFind(n)
+    mst_edges = []
+
+    for w, u, v in edges:
+        if uf.union(u, v):
+            mst_edges.append((w, u, v))
+        if len(mst_edges) == n - 1:
+            break
+    end = time.perf_counter() 
+
+    # ---------- PART 3: MST EDGE TYPE STATS ----------
+    mst_groups = {
+        "pass_pass": [],
+        "fail_fail": [],
+        "pass_fail": [],
+        "all": []
+    }
+
+    for w, u, v in mst_edges:
+        if labels[u] and labels[v]:
+            mst_groups["pass_pass"].append(w)
+        elif not labels[u] and not labels[v]:
+            mst_groups["fail_fail"].append(w)
+        else:
+            mst_groups["pass_fail"].append(w)
+        mst_groups["all"].append(w)
+
+    mst_stats = {
+        #k: stats(np.array(v)) for k, v in mst_groups.items()
+        "all": stats(np.array(mst_groups["all"]))
+    }
+
+    return {
+        "global": global_stats,
+        "mst": mst_stats,
+        "mst_time": start-end
+    }
+
+def compute_mst_threshold_pruning_label(distance_matrix, criteria='mean', threshold=0.9):
+    """
+    Parameters
+    ----------
+    distance_matrix : (n, n) array-like
+    threshold : float in (0, 1)
+
+    Returns
+    -------
+    labels : list[int]
+        Cluster labels (0..k-1)
+    """
+
+    if not (0 < threshold < 1):
+        raise ValueError("threshold must be between 0 and 1")
+
+    D = np.asarray(distance_matrix)
+    n = D.shape[0]
+
+    # ---------- Step 1: Build MST (Kruskal) ----------
+    edges = []
+    for u in range(n):
+        for v in range(u + 1, n):
+            edges.append((D[u, v], u, v))
+
+    edges.sort(key=lambda x: x[0])
+
+    uf = UnionFind(n)
+    mst_edges = []
+
+    for w, u, v in edges:
+        if uf.union(u, v):
+            mst_edges.append((w, u, v))
+        if len(mst_edges) == n - 1:
+            break
+
+    # ---------- Step 2: Sort edges descending ----------
+    mst_edges.sort(reverse=True, key=lambda x: x[0])
+
+    # Track current edges
+    current_edges = mst_edges.copy()
+    current_weights = np.array([w for w, _, _ in current_edges])
+
+    current_mean = current_weights.mean()
+    current_std = current_weights.std()
+
+    # ---------- Step 3: Iterative pruning ----------
+    for edge in mst_edges:
+        w, u, v = edge
+
+        # Try removing this edge
+        temp_edges = [e for e in current_edges if e != edge]
+
+        if len(temp_edges) == 0:
+            break
+
+        temp_weights = np.array([e[0] for e in temp_edges])
+        
+        temp_mean = temp_weights.mean()
+        temp_std = temp_weights.std()
+
+
+        # Check stopping condition
+        
+        if criteria=='mean' and temp_mean < threshold*current_mean:
+            # Accept removal
+            current_edges = temp_edges
+            current_mean = temp_mean
+            current_std = temp_std
+        elif criteria=='std' and temp_std < threshold*current_std:
+            # Accept removal
+            current_edges = temp_edges
+            current_mean = temp_mean
+            current_std = temp_std
+        elif criteria=='both' and ((temp_mean < threshold*current_mean)or(temp_std < threshold*current_std)):
+            # Accept removal
+            current_edges = temp_edges
+            current_mean = temp_mean
+            current_std = temp_std
+        else:
+            # Stop immediately (greedy stopping)
+            break
+    #print('mst pruning', criteria, threshold, current_threshold)
+    # ---------- Step 4: Build clusters ----------
+    uf = UnionFind(n)
+    for w, u, v in current_edges:
+        uf.union(u, v)
+
+    # Assign compact labels
+    root_to_label = {}
+    labels = [0] * n
+    label_id = 0
+
+    for i in range(n):
+        root = uf.find(i)
+        if root not in root_to_label:
+            root_to_label[root] = label_id
+            label_id += 1
+        labels[i] = root_to_label[root]
+
+    return labels
+
+
+def merge_cluster_labels(labels_a, labels_b, flag):
+    """
+    Parameters
+    ----------
+    labels_a : list[int]
+    labels_b : list[int]
+    flag : str ('union' or 'intersection')
+
+    Returns
+    -------
+    merged_labels : list[int]
+    """
+
+    if len(labels_a) != len(labels_b):
+        raise ValueError("Input label lists must have same length")
+
+    n = len(labels_a)
+
+    if flag == "union":
+        # --- Build bipartite connectivity via Union-Find ---
+        uf = UnionFind(n)
+
+        # Map cluster → nodes
+        clusters_a = defaultdict(list)
+        clusters_b = defaultdict(list)
+
+        for i in range(n):
+            clusters_a[labels_a[i]].append(i)
+            clusters_b[labels_b[i]].append(i)
+
+        # For each cluster in A, union all nodes that share a B cluster
+        # Efficient trick: group by (A label, B label)
+        pair_groups = defaultdict(list)
+        for i in range(n):
+            pair_groups[(labels_a[i], labels_b[i])].append(i)
+
+        # Connect nodes that share either A or B cluster via overlap
+        for nodes in pair_groups.values():
+            base = nodes[0]
+            for node in nodes[1:]:
+                uf.union(base, node)
+
+        # Additionally connect within same A cluster
+        for nodes in clusters_a.values():
+            base = nodes[0]
+            for node in nodes[1:]:
+                uf.union(base, node)
+
+        # And within same B cluster
+        for nodes in clusters_b.values():
+            base = nodes[0]
+            for node in nodes[1:]:
+                uf.union(base, node)
+
+        # Assign labels
+        root_to_label = {}
+        merged = [0] * n
+        label_id = 0
+
+        for i in range(n):
+            r = uf.find(i)
+            if r not in root_to_label:
+                root_to_label[r] = label_id
+                label_id += 1
+            merged[i] = root_to_label[r]
+
+        return merged
+
+    elif flag == "intersection":
+        # --- Exact refinement: clusters = intersections of A and B ---
+        pair_groups = defaultdict(list)
+
+        for i in range(n):
+            pair_groups[(labels_a[i], labels_b[i])].append(i)
+
+        merged = [0] * n
+        label_id = 0
+
+        for nodes in pair_groups.values():
+            for i in nodes:
+                merged[i] = label_id
+            label_id += 1
+
+        return merged
+
+    else:
+        raise ValueError("flag must be 'union' or 'intersection'")

@@ -9,13 +9,13 @@ def compute_semantic_MST(texts, model=None, distance_matrix=None):
         r = len(texts)
         m_distance = model.similarity(model.encode(texts), model.encode(texts))
         torch.cuda.empty_cache()
-        m_distance = np.round(np.asarray(m_distance),4)
+        m_distance = np.round(np.asarray(m_distance),6)
 
         for i in range(r):
             for j in range(r):
                 m_distance[i][j] = 1 - m_distance[i][j]
-                if i!=j and m_distance[i][j] < 0.0001:
-                    m_distance[i][j]= 0.0001
+                if i!=j and m_distance[i][j] < 0.000001:
+                    m_distance[i][j]= 0.000001
                 elif i == j:
                     m_distance[i][j]=0
     else:
