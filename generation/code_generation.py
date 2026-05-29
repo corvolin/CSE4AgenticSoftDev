@@ -14,61 +14,23 @@ from generation.utils import remove_comments, extract_all_comments, extract_betw
 def create_agents(multi_agent, model):
 
     agents = dict()
-    if multi_agent=='coder':
-        agents['coder']=python_developer('',PYTHON_DEVELOPER, '', '', model)
     
-    elif multi_agent=='funcReviewer':
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='funcReviewer_secReviewer':
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-        agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='funcAnalyst_coder':
-        agents['analyst_func'] = analyst_functionality(TEAM_FC,SYS_ANALYST_FUNCTIONALITY, '', '',model)
-        agents['coder'] = python_developer(TEAM_FC,PYTHON_DEVELOPER, '', '', model)
-
-    elif multi_agent=='secAnalyst_coder':
-        agents['analyst_sec'] = analyst_security(TEAM_SC,SYS_ANALYST_SECURITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_SC,PYTHON_DEVELOPER, '', '', model)
-
-    elif multi_agent=='funcAnalyst_secAnalyst_coder':
-        agents['analyst_func']= analyst_functionality(TEAM_FSC,SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['analyst_sec'] = analyst_security(TEAM_FSC,SYS_ANALYST_SECURITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_FSC,PYTHON_DEVELOPER, '', '', model)
-
-    elif multi_agent=='coder_funcReviewer':
-        agents['coder'] = python_developer(TEAM_CF, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='coder_funcReviewer_secReviewer':
-        agents['coder'] = python_developer(TEAM_CF, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-        agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='funcAnalyst_coder_funcReviewer':
-        agents['analyst_func']= analyst_functionality(TEAM_FCF, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_FCF, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_FCF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='funcAnalyst_coder_funcReviewer_secReviewer':
-        agents['analyst_func']= analyst_functionality(TEAM_FCF, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_FCF, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_FCF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-        agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-
-    elif multi_agent=='secAnalyst_coder_funcReviewer_secReviewer':
-        agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_SC, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
+    if multi_agent=='voting':
+        selected_models = ['mistralai/Mistral-7B-Instruct-v0.2','codellama/CodeLlama-7b-Instruct-hf','deepseek-ai/deepseek-coder-7b-instruct-v1.5','Qwen/Qwen2.5-Coder-7B-Instruct']
+        #selected_models = ['codellama/CodeLlama-7b-Instruct-hf' ]
+        for n in selected_models:
+            if n!= model:
+                agents[n] = reviewer_functionality(model=model, role=SYS_REVIEWER_FUNCTIONALITY)
+    else:
+        if 'coder' in multi_agent:
+            agents['coder']=python_developer(model=model, role=PYTHON_DEVELOPER)
+        if 'funcReviewer' in multi_agent:
+            agents['reviewer_func'] = reviewer_functionality(model=model, role=SYS_REVIEWER_FUNCTIONALITY)
+        if 'funcAnalyst' in multi_agent:
+            agents['analyst_func'] = analyst_functionality(TEAM_FC,SYS_ANALYST_FUNCTIONALITY, '', '',model)
+        if 'secAnalyst' in multi_agent or 'secReviewer' in multi_agent:
+            agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
         
-    elif multi_agent=='funcAnalyst_secAnalyst_coder_funcReviewer_secReviewer':
-        agents['analyst_func']= analyst_functionality(TEAM_FCF, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['analyst_sec']= analyst_security(TEAM_SC, SYS_ANALYST_FUNCTIONALITY, '', '', model)
-        agents['coder'] = python_developer(TEAM_SC, PYTHON_DEVELOPER, '', '', model)
-        agents['reviewer_func'] = reviewer_functionality(TEAM_CF, SYS_REVIEWER_FUNCTIONALITY, '', '', model)
-
-
     return agents
     
 
