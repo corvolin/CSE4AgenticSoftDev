@@ -10,15 +10,17 @@ from agent.reviewer_functionality import reviewer_functionality
 from agent.role_play import REVIEWER_FUNC_EQ
 from generation.utils import extract_all_comments
 from evaluation.utils import compute_pass_at_k, self_eval_per_code
-from analysis.code_semantic_entropy import compute_semantic_entropy_clustering, compute_semantic_entropy_equivalence
-from analysis.code_semantic_entropy import compute_lexical_entropy_equivalence, compute_structural_entropy_equivalence 
+
+from analysis.code_baseline_entropy import compute_semantic_entropy_equivalence, compute_lexical_entropy_equivalence, compute_structural_entropy_equivalence 
 from analysis.code_semantic_entropy import compute_semantic_entropy_HDBSCAN, compute_semantic_entropy_DBSCAN, compute_semantic_entropy_threshold
-from analysis.code_semantic_entropy import compute_mst_pruning_entropy, compute_joint_cluter_entropy
-from analysis.code_semantic_entropy import compute_mst_DBSCAN_entropy, compute_mean_threshold_DBSCAN_entropy, compute_mst_mean_threshold_DBSCAN_entropy
-from analysis.code_semantic_entropy import compute_ratio_DBSCAN_entropy, compute_mst_pruning_ratio_DBSCAN_entropy
 from analysis.code_semantic_distance import compute_semantic_distance, compute_lexical_distance, compute_structural_distance
 from analysis.code_semantic_alignment import compute_semantic_alignment
+
 from analysis.code_semantic_MST import compute_semantic_MST
+from analysis.code_semantic_MST import compute_mst_pruning_entropy, compute_joint_cluter_entropy
+from analysis.code_semantic_MST import compute_mst_DBSCAN_entropy, compute_mean_threshold_DBSCAN_entropy, compute_mst_mean_threshold_DBSCAN_entropy
+from analysis.code_semantic_MST import compute_ratio_DBSCAN_entropy, compute_mst_pruning_ratio_DBSCAN_entropy
+
 from analysis.utils import get_list_code_threshold, get_list_func_plan_threshold, get_thershold_by_reference, get_column, majority_true, edge_type_stats
 
 def report_codeguard(base_dir, multi_agent='none', data_dir=''):
@@ -329,14 +331,14 @@ def report_align(texts, model, row_value, requirement='', prefix=''):
         else:
             # semantic alignment
             start = time.perf_counter() 
-            align_mean, align_max, align_min, align_std = compute_semantic_alignment(texts, requirement, model[m])
+            l_align = compute_semantic_alignment(texts, requirement, model[m])
             end = time.perf_counter()
             align_time = end - start 
-
-            row_value[prefix+'_align_mean_'+m] = align_mean
-            row_value[prefix+'_align_max_'+m] = align_max
-            row_value[prefix+'_align_min_'+m] = align_min
-            row_value[prefix+'_align_std_'+m] = align_std
+            
+            row_value[prefix+'_align_mean_'+m] = np.mean(l_align)
+            row_value[prefix+'_align_max_'+m] = np.max(l_align)
+            row_value[prefix+'_align_min_'+m] = np.min(l_align)
+            row_value[prefix+'_align_std_'+m] = np.std(l_align)
             row_value[prefix+'_align_time_'+m] = align_time
 
 # compute pair-wise cosine similarity between a set of texts
@@ -469,7 +471,7 @@ def report_scaled(texts, model, row_value, thresholds, base_key, target_key, ref
             for tf in threshold_function:
                 start = time.perf_counter() 
                 threshold = get_thershold_by_reference(thresholds[m][base_key], row_value[target_key+'_'+m], thresholds[m][reference_key], tf)
-                se_scaled = compute_semantic_entropy_threshold(texts, threshold, model[m], distance_matrix=dist_matrix[m])
+                se_scaled = compute_semantic_entropy_DBSCAN(texts, model[m], distance_matrix=dist_matrix[m], epsilon=threshold)
                 end = time.perf_counter()
 
                 row_value[prefix+'_se_'+tf+'_'+m] = se_scaled

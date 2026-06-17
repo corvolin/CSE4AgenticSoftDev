@@ -7,7 +7,9 @@ from tqdm import tqdm
 import shutil
 import subprocess
 import re
+import gc
 import pickle
+import torch
 
 from sentence_transformers import SentenceTransformer
 
@@ -17,7 +19,7 @@ from generation.utils import extract_all_comments
 from evaluation.eval_codeguard import codeql_create_db, codeql_analyze, run_test_codeguard, update_stat_codeguard
 from evaluation.eval_humaneval import update_stat_humaneval
 from evaluation.eval_bigcodebench import update_stat_bigcodebench
-from evaluation.utils import init_stat, update_stat_P_true
+from evaluation.utils import init_stat, update_stat_P_true, update_stat_voting
 
 from analysis.report import report_codeguard, report
 
@@ -39,6 +41,7 @@ parser.add_argument('--output_path', type=str, default='output.jsonl')
 
 
 parser.add_argument('--do_generation', action='store_true')
+parser.add_argument('--do_voting', action='store_true')
 parser.add_argument('--do_evaluation', action='store_true')
 parser.add_argument('--do_report', action='store_true')
 
@@ -56,15 +59,9 @@ parser.add_argument('--fail_list', type=list, default=[])
 parser.add_argument('--append', action='store_true')
 parser.add_argument('--verbose', action='store_true')
 parser.add_argument("--timeout", type=float, default=10, help="how many seconds to wait during execution for each test case")
+
+parser.add_argument('--iterative_test', type=int, default=10)
 args = parser.parse_args()
-
-'''
-mistralai/Mistral-7B-Instruct-v0.2
-codellama/CodeLlama-7b-Instruct-hf
-deepseek-ai/deepseek-coder-7b-instruct-v1.5
-Qwen/Qwen2.5-Coder-7B-Instruct
-'''
-
 
 def read_jsonl_file(filepath):
     data = []
@@ -91,13 +88,17 @@ if __name__ == '__main__':
     if not os.path.exists(base_dir):
         os.makedirs(base_dir)
 
+    agents = None
+    # agent allocation    
     if args.do_generation:
         agents = create_agents(args.multi_agent, args.model)
-    elif args.do_evaluation or args.do_report:
+    elif args.do_evaluation:
         if args.dataset=='codeguard_python.jsonl':
             agents = create_agents('funcReviewer_secReviewer', args.model)
         else:
             agents = create_agents('funcReviewer', args.model)
+    elif args.do_voting:
+        agents = create_agents('voting', args.model)
 
     pbar = tqdm(total=len(data), desc="Processing")
 
@@ -209,23 +210,70 @@ if __name__ == '__main__':
                 update_stat_P_true(file_names, stat_file, code_dir, task['instruct_prompt_clean'],agents['reviewer_func'])
                 # update_stat_bigcodebench(file_names, stat_file, task['test'], task['entry_point'], code_dir,task['code_prompt'] + '\n' + task['canonical_solution'])
 
+        if args.do_voting:
+            if args.dataset=='codeguard_python.jsonl':
+                continue
+            elif args.dataset=='HumanEval.jsonl':
+
+                code_dir = os.path.join(output_dir, 'code')
+                stat_file = os.path.join(output_dir, 'stat.json')
+
+                if os.path.isdir(output_dir): 
+                    file_names = [s for s in os.listdir(code_dir) if s.endswith('py')] 
+                update_stat_voting(file_names, stat_file, code_dir, extract_all_comments(task['prompt']),agents)
+
+            elif args.dataset=='bigCodeBench_hard.jsonl':
+                code_dir = os.path.join(output_dir, 'code')
+                stat_file = os.path.join(output_dir, 'stat.json')
+
+                if os.path.isdir(output_dir): 
+                    file_names = [s for s in os.listdir(code_dir) if s.endswith('py')] 
+                update_stat_voting(file_names, stat_file, code_dir, task['instruct_prompt_clean'],agents)
 
     pbar.close()
-
+    encoders = None
     if args.do_report:
-        model = dict()
-        model['allMiniLM'] = SentenceTransformer("all-MiniLM-L6-v2")
-        model['Qwen3'] = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
-        model['modernbert'] = SentenceTransformer("Alibaba-NLP/gte-modernbert-base")
-        model['equivalence'] = agents['reviewer_func']
-
-        with open('threshold.pkl', 'rb') as file:
-            thresholds = pickle.load(file)
+        attn_implementation = "sdpa"  # Or "flash_attention_2" "eager" "sdpa"
+        encoders = dict()
+        encoders['allMiniLM'] = SentenceTransformer("all-MiniLM-L6-v2")
+        encoders['modernbert'] = SentenceTransformer("Alibaba-NLP/gte-modernbert-base",
+            model_kwargs={"attn_implementation": attn_implementation, "device_map": "auto", "torch_dtype": "bfloat16"})
+        encoders['Qwen3-0.6B'] = SentenceTransformer(
+            "Qwen/Qwen3-Embedding-0.6B",
+            model_kwargs={"attn_implementation": attn_implementation, "device_map": "auto", "torch_dtype": "bfloat16"},
+            tokenizer_kwargs={"padding_side": "left"},
+        )
+        encoders['Qwen3-4B'] = SentenceTransformer(
+            "Qwen/Qwen3-Embedding-4B",
+            model_kwargs={"attn_implementation": attn_implementation, "device_map": "auto", "torch_dtype": "bfloat16"},
+            tokenizer_kwargs={"padding_side": "left"},
+        )
+        encoders['Qwen3-8B'] = SentenceTransformer(
+            "Qwen/Qwen3-Embedding-8B",
+            model_kwargs={"attn_implementation": attn_implementation, "device_map": "auto", "torch_dtype": "bfloat16"},
+            tokenizer_kwargs={"padding_side": "left"},
+        )
+        encoders['nemotron'] = SentenceTransformer(
+            "nvidia/llama-embed-nemotron-8b",
+            trust_remote_code=True,
+            model_kwargs={"attn_implementation": attn_implementation, "torch_dtype": "bfloat16"},
+            tokenizer_kwargs={"padding_side": "left"},
+        )
+        #model['equivalence'] = agents['reviewer_func']'Qwen3-0.6B''Qwen3-4B''Qwen3-8B'
 
         if args.dataset=='codeguard_python.jsonl':
             report_codeguard(base_dir,multi_agent=args.multi_agent, data_dir='data')
         else:
-            report(base_dir, multi_agent=args.multi_agent, model=model, data=data, dataset=args.dataset, thresholds=thresholds)
+            report(base_dir, multi_agent=args.multi_agent, model=encoders, data=data, dataset=args.dataset)
 
+    if agents is not None:
+        for key, a in agents.items():
+            del a
+    if encoders is not None:
+        for key, e in encoders.items():
+            del e
+        
+    gc.collect()
+    torch.cuda.empty_cache()
         
                         
